@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare-boilerplate/prisma",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A reusable library for Prisma + Hyperdrive + Supabase integration in Cloudflare Workers",
   "type": "module",
   "main": "./dist/index.js",
@@ -68,4 +68,3 @@
     "vitest": "^2.0.0"
   }
 }
-
