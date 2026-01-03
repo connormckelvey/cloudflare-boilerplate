@@ -88,6 +88,15 @@ Or in `wrangler.json`:
 }
 ```
 
+**Important:** For local development, create a `.env` file in your project root with:
+
+```env
+DATABASE_URL=postgresql://user:password@host:port/database
+CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://user:password@host:port/database
+```
+
+**Note:** Wrangler reads Hyperdrive local connection strings from `.env` (not `.dev.vars`). Use `.env` for all local environment variables, including `DATABASE_URL` for Prisma CLI commands.
+
 ### 4. Use in Your Cloudflare Worker
 
 ```typescript
@@ -163,7 +172,16 @@ export default {
 
 ### Local Development with DATABASE_URL
 
-For local development, the library falls back to `DATABASE_URL`:
+For local development, the library falls back to `DATABASE_URL`. Create a `.env` file in your project root:
+
+```env
+DATABASE_URL=postgresql://user:password@host:port/database
+CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE=postgresql://user:password@host:port/database
+```
+
+**Note:** Wrangler reads Hyperdrive local connection strings from `.env` (not `.dev.vars`). Use `.env` for all local environment variables.
+
+Then in your code:
 
 ```typescript
 import { PrismaClient } from '../prisma/generated/client';
@@ -262,10 +280,11 @@ After updating your Prisma schema:
 npx prisma generate
 ```
 
-### Run Migrations
+For local development, you may want to use `dotenv-cli` to load your `.env` file:
 
 ```bash
-npx prisma migrate dev
+npm install -D dotenv-cli
+npx dotenv -- prisma generate
 ```
 
 ### Push Schema (Development)
@@ -274,10 +293,34 @@ npx prisma migrate dev
 npx prisma db push
 ```
 
+Or with `dotenv-cli`:
+
+```bash
+npx dotenv -- prisma db push
+```
+
 ### Open Prisma Studio
 
 ```bash
 npx prisma studio
+```
+
+Or with `dotenv-cli`:
+
+```bash
+npx dotenv -- prisma studio
+```
+
+**Tip:** You can add these to your `package.json` scripts for convenience:
+
+```json
+{
+  "scripts": {
+    "db:generate": "dotenv -- prisma generate",
+    "db:push": "dotenv -- prisma db push",
+    "db:studio": "dotenv -- prisma studio"
+  }
+}
 ```
 
 ## Error Handling
@@ -351,26 +394,13 @@ Make sure you've:
 1. Generated the Prisma client after updating your schema
 2. Restarted your TypeScript server/IDE
 
-## Migration from Direct Prisma Usage
+## Important Notes
 
-If you're currently using Prisma directly, migration is straightforward:
+### Environment Variables
 
-**Before:**
-```typescript
-import { PrismaClient } from '../prisma/generated/client';
-const prisma = new PrismaClient();
-```
-
-**After:**
-```typescript
-import { PrismaClient } from '../prisma/generated/client';
-import { getPrisma } from '@cloudflare-boilerplate/prisma';
-const prisma = getPrisma(PrismaClient, env);
-```
-
-The main differences are:
-1. Pass your `PrismaClient` class as the first parameter
-2. Pass the `env` object to get Hyperdrive support
+- **Production:** Hyperdrive binding provides the connection string automatically
+- **Local Development:** Use a `.env` file (not `.dev.vars`) - Wrangler reads Hyperdrive local connection strings from `.env` by design
+- **Prisma CLI:** Reads `DATABASE_URL` from `.env` for commands like `prisma db push` and `prisma generate`
 
 ## Contributing
 
