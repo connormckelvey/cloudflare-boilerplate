@@ -18,7 +18,7 @@ export default {
       //   getConnectionString: (env) => env.MY_CUSTOM_BINDING?.connectionString ?? env.DATABASE_URL
       // });
       const prisma = createPrismaClient(PrismaClient, env, {
-        getConnectionString: (env) => env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL
+        getConnectionString: (env: Env) => env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL
       });
 
       // Example query - get all posts
