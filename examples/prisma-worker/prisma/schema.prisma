@@ -1,0 +1,27 @@
+generator client {
+  provider = "prisma-client"
+  runtime  = "cloudflare"
+  output   = "./generated/cloudflare"
+}
+
+// Node.js client for seeding (runs outside Cloudflare Workers)
+generator client_nodejs {
+  provider = "prisma-client"
+  output   = "./generated/node"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  title     String
+  content   String?
+  published Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("posts")
+}
+

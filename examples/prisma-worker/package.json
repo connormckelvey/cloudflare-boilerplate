@@ -1,0 +1,29 @@
+{
+  "name": "prisma-worker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:generate": "dotenv -- prisma generate",
+    "db:push": "dotenv -- prisma db push",
+    "db:studio": "dotenv -- prisma studio",
+    "db:seed": "dotenv -- npx tsx prisma/seed.ts"
+  },
+  "prisma": {
+    "seed": "npx tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@cloudflare-boilerplate/prisma": "*",
+    "@prisma/client": "^7.2.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241106.0",
+    "dotenv-cli": "^7.4.2",
+    "prisma": "^7.2.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.0.0"
+  }
+}
+
