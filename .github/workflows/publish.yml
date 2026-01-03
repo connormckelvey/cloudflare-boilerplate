@@ -3,7 +3,7 @@ name: Publish
 on:
   push:
     tags:
-      - 'v*'  # Triggers on tags like v0.1.0, v1.0.0, etc.
+      - '*@v*'  # Triggers on package-specific tags like prisma@v0.1.0
 
 jobs:
   publish:
@@ -19,17 +19,23 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Extract version from tag
-        id: version
+      - name: Extract package and version from tag
+        id: tag_info
         run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
+          TAG=${GITHUB_REF#refs/tags/}
+          # Extract package name (everything before @v)
+          PACKAGE_NAME=${TAG%@v*}
+          # Extract version (everything after @v)
+          VERSION=${TAG#*@v}
+          echo "package=$PACKAGE_NAME" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Extracted version: $VERSION"
+          echo "Extracted package: $PACKAGE_NAME, version: $VERSION"
       
       - name: Update package.json version
-        working-directory: packages/prisma
+        id: update_version
+        working-directory: packages/${{ steps.tag_info.outputs.package }}
         run: |
-          npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+          npm version ${{ steps.tag_info.outputs.version }} --no-git-tag-version
           cat package.json | grep '"version"'
       
       - name: Setup Node.js
@@ -44,14 +50,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
       
-      - name: Build library
-        run: cd packages/prisma && npm run build
+      - name: Build package
+        run: cd packages/${{ steps.tag_info.outputs.package }} && npm run build
       
       - name: Run tests
-        run: cd packages/prisma && npm test
+        run: cd packages/${{ steps.tag_info.outputs.package }} && npm test
       
       - name: Publish to npm
-        working-directory: packages/prisma
+        working-directory: packages/${{ steps.tag_info.outputs.package }}
         run: npm publish --provenance
         # Trusted Publishing - no token needed!
 
