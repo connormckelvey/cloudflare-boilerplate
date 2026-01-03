@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags:
+      - '*@v*'  # Also run CI on release tags
   pull_request:
     branches: [main, master]
+  workflow_call:  # Make it reusable so publish can call it
 
 jobs:
   build:
