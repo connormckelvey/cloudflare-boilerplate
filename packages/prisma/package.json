@@ -46,6 +46,11 @@
   ],
   "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/connormckelvey/cloudflare-boilerplate.git",
+    "directory": "packages/prisma"
+  },
   "publishConfig": {
     "access": "public"
   },

@@ -1,0 +1,57 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'  # Triggers on tags like v0.1.0, v1.0.0, etc.
+
+jobs:
+  publish:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # Required for Trusted Publishing
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+      
+      - name: Update package.json version
+        working-directory: packages/prisma
+        run: |
+          npm version ${{ steps.version.outputs.version }} --no-git-tag-version
+          cat package.json | grep '"version"'
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+      
+      - name: Install latest npm
+        run: npm install -g npm@latest
+      
+      - name: Install dependencies
+        run: npm ci
+      
+      - name: Build library
+        run: cd packages/prisma && npm run build
+      
+      - name: Run tests
+        run: cd packages/prisma && npm test
+      
+      - name: Publish to npm
+        working-directory: packages/prisma
+        run: npm publish --provenance
+        # Trusted Publishing - no token needed!
+
