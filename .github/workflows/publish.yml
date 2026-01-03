@@ -19,24 +19,18 @@ jobs:
         with:
           fetch-depth: 0
       
-      - name: Extract package and version from tag
+      - name: Extract package from tag
         id: tag_info
         run: |
           TAG=${GITHUB_REF#refs/tags/}
           # Extract package name (everything before @v)
           PACKAGE_NAME=${TAG%@v*}
-          # Extract version (everything after @v)
+          # Extract version (everything after @v) - just for logging
           VERSION=${TAG#*@v}
           echo "package=$PACKAGE_NAME" >> $GITHUB_OUTPUT
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Extracted package: $PACKAGE_NAME, version: $VERSION"
-      
-      - name: Update package.json version
-        id: update_version
-        working-directory: packages/${{ steps.tag_info.outputs.package }}
-        run: |
-          npm version ${{ steps.tag_info.outputs.version }} --no-git-tag-version
-          cat package.json | grep '"version"'
+          echo "Note: package.json version should already match the tag (updated by release script)"
       
       - name: Setup Node.js
         uses: actions/setup-node@v4
