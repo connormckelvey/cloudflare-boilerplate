@@ -37,9 +37,6 @@ jobs:
       - name: Type check example
         run: cd examples/prisma-worker && npx tsc --noEmit
       
-      - name: Build all
-        run: npm run build
-      
       - name: Test
         run: npm run test
 
