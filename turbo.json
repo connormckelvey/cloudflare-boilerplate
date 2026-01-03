@@ -13,6 +13,10 @@
     "clean": {
       "cache": false
     },
+    "test": {
+      "dependsOn": ["build"],
+      "cache": false
+    },
     "db:generate": {
       "cache": false,
       "outputs": ["prisma/generated/**"]
