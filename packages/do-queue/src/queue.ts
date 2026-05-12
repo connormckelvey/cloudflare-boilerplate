@@ -1,0 +1,159 @@
+import type { QueueMessage, QueueOptions, ConsumerHandler, StoredMessage } from "./types";
+import { computeBackoff } from "./retry";
+
+const FALLBACK_ALARM_MS = 10_000;
+
+export function createDOQueue<T = unknown, Env = unknown>(
+  handler: ConsumerHandler<T, Env>,
+  options?: QueueOptions
+) {
+  const maxRetries = options?.maxRetries ?? 3;
+  const retryBaseDelayMs = options?.retryBaseDelayMs ?? 1000;
+  const retryMaxDelayMs = options?.retryMaxDelayMs ?? 30000;
+  const retryJitter = options?.retryJitter ?? 0.1;
+
+  return class DOQueueImpl {
+    ctx: DurableObjectState;
+    env: Env;
+    #processing = false;
+
+    constructor(ctx: DurableObjectState, env: Env) {
+      this.ctx = ctx;
+      this.env = env;
+    }
+
+    async fetch(request: Request): Promise<Response> {
+      const url = new URL(request.url);
+
+      if (url.pathname === "/enqueue" && request.method === "POST") {
+        return this.#handleEnqueue(request);
+      }
+      if (url.pathname === "/stats" && request.method === "GET") {
+        return this.#handleStats();
+      }
+
+      return new Response("Not found", { status: 404 });
+    }
+
+    async #handleEnqueue(request: Request): Promise<Response> {
+      const { queue, body } = (await request.json()) as {
+        queue: string;
+        body: T;
+      };
+      const id = crypto.randomUUID();
+      const enqueuedAt = Date.now();
+
+      const msg: StoredMessage<T> = {
+        id,
+        queue,
+        body,
+        enqueuedAt,
+        attempts: 0,
+        maxRetries,
+      };
+
+      const key = `msg:${String(enqueuedAt).padStart(15, "0")}:${id}`;
+      await this.ctx.storage.put(key, msg);
+
+      // Trigger immediate processing if not already running
+      if (!this.#processing) {
+        this.ctx.waitUntil(this.#processNext());
+      }
+
+      return Response.json({ messageId: id });
+    }
+
+    async #processNext(): Promise<void> {
+      if (this.#processing) return;
+      this.#processing = true;
+
+      try {
+        while (true) {
+          const entries = await this.ctx.storage.list<StoredMessage<T>>({
+            prefix: "msg:",
+            limit: 1,
+          });
+
+          if (entries.size === 0) break;
+
+          const [key, msg] = entries.entries().next().value!;
+
+          // Check if message is in retry backoff
+          if (msg.retryAfter && Date.now() < msg.retryAfter) {
+            await this.ctx.storage.setAlarm(msg.retryAfter);
+            return;
+          }
+
+          msg.attempts++;
+
+          const queueMessage: QueueMessage<T> = {
+            id: msg.id,
+            body: msg.body,
+            enqueuedAt: msg.enqueuedAt,
+            attempts: msg.attempts,
+            maxRetries: msg.maxRetries,
+          };
+
+          try {
+            await handler.process(queueMessage, this.env);
+
+            // Success: delete the message
+            await this.ctx.storage.delete(key);
+          } catch (error) {
+            const err =
+              error instanceof Error ? error : new Error(String(error));
+            msg.lastError = err.message;
+
+            if (msg.attempts >= msg.maxRetries) {
+              // Dead letter: remove from queue
+              await this.ctx.storage.delete(key);
+
+              if (handler.deadLetter) {
+                try {
+                  await handler.deadLetter(queueMessage, err, this.env);
+                } catch (dlqError) {
+                  console.error(
+                    "do-queue: dead letter handler failed:",
+                    dlqError
+                  );
+                }
+              }
+            } else {
+              // Retry: update message with backoff timestamp
+              const delay = computeBackoff(
+                msg.attempts,
+                retryBaseDelayMs,
+                retryMaxDelayMs,
+                retryJitter
+              );
+              msg.retryAfter = Date.now() + delay;
+              await this.ctx.storage.put(key, msg);
+              await this.ctx.storage.setAlarm(msg.retryAfter);
+              return; // Stop loop; alarm will resume
+            }
+          }
+        }
+      } finally {
+        this.#processing = false;
+
+        // Safety: set fallback alarm if messages remain (catches stranded state after DO eviction)
+        const remaining = await this.ctx.storage.list({
+          prefix: "msg:",
+          limit: 1,
+        });
+        if (remaining.size > 0) {
+          await this.ctx.storage.setAlarm(Date.now() + FALLBACK_ALARM_MS);
+        }
+      }
+    }
+
+    async alarm(): Promise<void> {
+      await this.#processNext();
+    }
+
+    async #handleStats(): Promise<Response> {
+      const entries = await this.ctx.storage.list({ prefix: "msg:" });
+      return Response.json({ pendingMessages: entries.size });
+    }
+  };
+}

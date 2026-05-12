@@ -1,0 +1,51 @@
+{
+  "name": "@cloudflare-boilerplate/do-queue",
+  "version": "0.1.0",
+  "description": "Durable Object-based queue for Cloudflare Workers with near-zero dispatch latency",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "durable-objects",
+    "queue",
+    "message-queue"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/connormckelvey/cloudflare-boilerplate.git",
+    "directory": "packages/do-queue"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@cloudflare/workers-types": "^4.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260430.1",
+    "typescript": "^5.9.0",
+    "vitest": "^2.0.0"
+  }
+}
