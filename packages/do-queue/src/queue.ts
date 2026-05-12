@@ -1,5 +1,5 @@
-import type { QueueMessage, QueueOptions, ConsumerHandler, StoredMessage } from "./types";
-import { computeBackoff } from "./retry";
+import type { QueueMessage, QueueOptions, ConsumerHandler, StoredMessage } from "./types.js";
+import { computeBackoff } from "./retry.js";
 
 const FALLBACK_ALARM_MS = 10_000;
 

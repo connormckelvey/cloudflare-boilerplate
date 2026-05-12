@@ -1,9 +1,9 @@
-export { createDOQueue } from "./queue";
-export { DOQueueProducer } from "./producer";
-export { computeBackoff } from "./retry";
+export { createDOQueue } from "./queue.js";
+export { DOQueueProducer } from "./producer.js";
+export { computeBackoff } from "./retry.js";
 export type {
   QueueMessage,
   QueueOptions,
   ConsumerHandler,
   StoredMessage,
-} from "./types";
+} from "./types.js";
