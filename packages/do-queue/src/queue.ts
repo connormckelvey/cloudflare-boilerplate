@@ -66,6 +66,7 @@ export function createDOQueue<T = unknown, Env = unknown>(
     async #processNext(): Promise<void> {
       if (this.#processing) return;
       this.#processing = true;
+      let retryAlarmSet = false;
 
       try {
         while (true) {
@@ -81,6 +82,7 @@ export function createDOQueue<T = unknown, Env = unknown>(
           // Check if message is in retry backoff
           if (msg.retryAfter && Date.now() < msg.retryAfter) {
             await this.ctx.storage.setAlarm(msg.retryAfter);
+            retryAlarmSet = true;
             return;
           }
 
@@ -129,6 +131,7 @@ export function createDOQueue<T = unknown, Env = unknown>(
               msg.retryAfter = Date.now() + delay;
               await this.ctx.storage.put(key, msg);
               await this.ctx.storage.setAlarm(msg.retryAfter);
+              retryAlarmSet = true;
               return; // Stop loop; alarm will resume
             }
           }
@@ -137,12 +140,15 @@ export function createDOQueue<T = unknown, Env = unknown>(
         this.#processing = false;
 
         // Safety: set fallback alarm if messages remain (catches stranded state after DO eviction)
-        const remaining = await this.ctx.storage.list({
-          prefix: "msg:",
-          limit: 1,
-        });
-        if (remaining.size > 0) {
-          await this.ctx.storage.setAlarm(Date.now() + FALLBACK_ALARM_MS);
+        // Skip if a retry alarm was already set — don't overwrite it
+        if (!retryAlarmSet) {
+          const remaining = await this.ctx.storage.list({
+            prefix: "msg:",
+            limit: 1,
+          });
+          if (remaining.size > 0) {
+            await this.ctx.storage.setAlarm(Date.now() + FALLBACK_ALARM_MS);
+          }
         }
       }
     }
