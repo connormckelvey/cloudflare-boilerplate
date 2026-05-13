@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createDOQueue } from "./queue";
 import { computeBackoff } from "./retry";
 import type { QueueMessage, ConsumerHandler } from "./types";
@@ -41,6 +41,15 @@ class MockStorage {
 
   async setAlarm(time: number) {
     this.alarmTime = time;
+  }
+
+  async transaction<T>(closure: (txn: MockStorage) => Promise<T>) {
+    return closure(this);
+  }
+
+  /** Count only message keys (exclude meta keys) */
+  get messageCount() {
+    return [...this.data.keys()].filter((k) => k.startsWith("msg:")).length;
   }
 
   get size() {
@@ -102,7 +111,7 @@ describe("createDOQueue", () => {
       await mock.enqueue("hello");
 
       expect(processed).toEqual(["hello"]);
-      expect(mock.storage.size).toBe(0);
+      expect(mock.storage.messageCount).toBe(0);
     });
 
     it("returns a messageId on enqueue", async () => {
@@ -137,6 +146,56 @@ describe("createDOQueue", () => {
 
       expect(order).toEqual([1, 2, 3]);
     });
+
+    it("preserves FIFO for same-millisecond enqueues", async () => {
+      const order: number[] = [];
+      let block: (() => void) | null = null;
+
+      const DOClass = createDOQueue<number, {}>({
+        async process(message) {
+          if (order.length === 0) {
+            // Block on first message so others queue up
+            await new Promise<void>((r) => { block = r; });
+          }
+          order.push(message.body);
+        },
+      });
+
+      const mock = createMockDO(DOClass, {});
+
+      // Fix Date.now() so all enqueues share the same millisecond
+      const now = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(now);
+
+      // First enqueue starts processing and blocks
+      const req1 = new Request("https://do-queue.internal/enqueue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ queue: "test", body: 1 }),
+      });
+      await mock.instance.fetch(req1);
+
+      // Enqueue 2 and 3 at the same millisecond while first is blocked
+      const req2 = new Request("https://do-queue.internal/enqueue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ queue: "test", body: 2 }),
+      });
+      const req3 = new Request("https://do-queue.internal/enqueue", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ queue: "test", body: 3 }),
+      });
+      await mock.instance.fetch(req2);
+      await mock.instance.fetch(req3);
+
+      // Unblock first message — loop should process 2, 3 in sequence order
+      block!();
+      await Promise.all(mock.waitUntilPromises.splice(0));
+      vi.restoreAllMocks();
+
+      expect(order).toEqual([1, 2, 3]);
+    });
   });
 
   describe("retry", () => {
@@ -155,7 +214,7 @@ describe("createDOQueue", () => {
       await mock.enqueue("retry-me");
 
       // First attempt failed, message should still be in storage
-      expect(mock.storage.size).toBe(1);
+      expect(mock.storage.messageCount).toBe(1);
       expect(mock.storage.alarmTime).not.toBeNull();
       expect(attempt).toBe(1);
 
@@ -166,7 +225,7 @@ describe("createDOQueue", () => {
 
       // Second attempt should succeed
       expect(attempt).toBe(2);
-      expect(mock.storage.size).toBe(0);
+      expect(mock.storage.messageCount).toBe(0);
     });
 
     it("passes correct attempt count to handler", async () => {
@@ -203,7 +262,15 @@ describe("createDOQueue", () => {
   });
 
   describe("dead letter", () => {
-    it("calls deadLetter after maxRetries exhausted", async () => {
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("calls deadLetter after maxRetries exhausted and deletes on success", async () => {
       const deadLettered: Array<{ id: string; error: string }> = [];
       const DOClass = createDOQueue<string, {}>({
         async process() {
@@ -227,7 +294,7 @@ describe("createDOQueue", () => {
 
       expect(deadLettered).toHaveLength(1);
       expect(deadLettered[0].error).toBe("always fails");
-      expect(mock.storage.size).toBe(0); // removed from queue
+      expect(mock.storage.messageCount).toBe(0); // removed after successful DLQ
     });
 
     it("handles missing deadLetter callback gracefully", async () => {
@@ -242,7 +309,108 @@ describe("createDOQueue", () => {
       await mock.enqueue("doomed");
 
       // Should not throw, message should be removed
-      expect(mock.storage.size).toBe(0);
+      expect(mock.storage.messageCount).toBe(0);
+    });
+
+    it("retains message when deadLetter handler throws", async () => {
+      let dlqCalls = 0;
+      const DOClass = createDOQueue<string, {}>({
+        async process() {
+          throw new Error("always fails");
+        },
+        async deadLetter() {
+          dlqCalls++;
+          throw new Error("DLQ handler also fails");
+        },
+      }, { maxRetries: 1, retryBaseDelayMs: 10 });
+
+      const mock = createMockDO(DOClass, {});
+      await mock.enqueue("doomed");
+
+      // process failed (attempt 1 = maxRetries), deadLetter was called and threw
+      expect(dlqCalls).toBe(1);
+      // Message should be retained in storage for DLQ retry
+      expect(mock.storage.messageCount).toBe(1);
+      // An alarm should be scheduled for retry
+      expect(mock.storage.alarmTime).not.toBeNull();
+    });
+
+    it("retries deadLetter handler on alarm and deletes on success", async () => {
+      let processCalls = 0;
+      let dlqCalls = 0;
+      const DOClass = createDOQueue<string, {}>({
+        async process() {
+          processCalls++;
+          throw new Error("always fails");
+        },
+        async deadLetter() {
+          dlqCalls++;
+          if (dlqCalls === 1) {
+            throw new Error("DLQ transient failure");
+          }
+          // Second DLQ call succeeds
+        },
+      }, { maxRetries: 1, retryBaseDelayMs: 10 });
+
+      const mock = createMockDO(DOClass, {});
+      const now = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(now);
+      await mock.enqueue("doomed");
+
+      // First DLQ attempt failed, message retained
+      expect(processCalls).toBe(1);
+      expect(dlqCalls).toBe(1);
+      expect(mock.storage.messageCount).toBe(1);
+
+      // Trigger alarm — DLQ retry should succeed
+      vi.spyOn(Date, "now").mockReturnValue(now + 100000);
+      await mock.triggerAlarm();
+      vi.restoreAllMocks();
+
+      expect(processCalls).toBe(1);
+      expect(dlqCalls).toBe(2);
+      expect(mock.storage.messageCount).toBe(0); // now deleted
+    });
+
+    it("keeps retrying deadLetter without rerunning process or discarding", async () => {
+      let processCalls = 0;
+      let dlqCalls = 0;
+      const DOClass = createDOQueue<string, {}>({
+        async process() {
+          processCalls++;
+          throw new Error("always fails");
+        },
+        async deadLetter() {
+          dlqCalls++;
+          throw new Error("DLQ always fails");
+        },
+      }, { maxRetries: 1, retryBaseDelayMs: 10 });
+
+      const mock = createMockDO(DOClass, {});
+      const now = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(now);
+      await mock.enqueue("doomed");
+
+      // DLQ attempt 1 failed
+      expect(processCalls).toBe(1);
+      expect(dlqCalls).toBe(1);
+      expect(mock.storage.messageCount).toBe(1);
+
+      // DLQ attempt 2
+      vi.spyOn(Date, "now").mockReturnValue(now + 100000);
+      await mock.triggerAlarm();
+      expect(processCalls).toBe(1);
+      expect(dlqCalls).toBe(2);
+      expect(mock.storage.messageCount).toBe(1);
+
+      // DLQ attempt 3 — still retained, matching a configured Cloudflare DLQ handoff
+      vi.spyOn(Date, "now").mockReturnValue(now + 200000);
+      await mock.triggerAlarm();
+      vi.restoreAllMocks();
+
+      expect(processCalls).toBe(1);
+      expect(dlqCalls).toBe(3);
+      expect(mock.storage.messageCount).toBe(1);
     });
   });
 

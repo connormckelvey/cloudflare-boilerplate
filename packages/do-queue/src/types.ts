@@ -27,8 +27,12 @@ export interface StoredMessage<T = unknown> {
   queue: string;
   body: T;
   enqueuedAt: number;
+  seq: number;
+  state?: "ready" | "dead-lettering";
   attempts: number;
   maxRetries: number;
   retryAfter?: number;
   lastError?: string;
+  /** Number of times the deadLetter handler itself has failed. */
+  dlqAttempts?: number;
 }
