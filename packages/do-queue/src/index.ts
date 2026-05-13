@@ -3,10 +3,14 @@ export { DOQueueProducer } from "./producer.js";
 export type { DOQueueClass, DOQueueInstance, DOQueueNamespace } from "./queue.js";
 export type {
   ConsumerHandler,
+  DeadLetterMessage,
   EnqueueRequest,
   EnqueueResult,
+  MessageBatch,
   QueueMessage,
+  QueueExecutionContext,
   QueueOptions,
+  QueueRetryOptions,
   QueueStats,
   StoredMessage,
 } from "./types.js";

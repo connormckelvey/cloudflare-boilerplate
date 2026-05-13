@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createDOQueue } from "./queue";
 import { computeBackoff } from "./retry";
-import type { QueueMessage, ConsumerHandler } from "./types";
+import type { MessageBatch, StoredMessage } from "./types";
 
 // --- Mock DO storage as an in-memory sorted map ---
 
@@ -47,13 +47,12 @@ class MockStorage {
     return closure(this);
   }
 
-  /** Count only message keys (exclude meta keys) */
   get messageCount() {
     return [...this.data.keys()].filter((k) => k.startsWith("msg:")).length;
   }
 
-  get size() {
-    return this.data.size;
+  async messages<T>() {
+    return [...(await this.list<StoredMessage<T>>({ prefix: "msg:" })).values()];
   }
 }
 
@@ -79,9 +78,14 @@ function createMockDO<T, Env>(
     waitUntilPromises,
     async enqueue(body: T, queue = "test-queue") {
       const result = await instance.enqueue({ queue, body });
-      // Wait for processing triggered by waitUntil
       await Promise.all(waitUntilPromises.splice(0));
       return result;
+    },
+    async enqueueWithoutDrain(body: T, queue = "test-queue") {
+      return instance.enqueue({ queue, body });
+    },
+    async drain() {
+      await Promise.all(waitUntilPromises.splice(0));
     },
     async triggerAlarm() {
       storage.alarmTime = null;
@@ -90,15 +94,19 @@ function createMockDO<T, Env>(
   };
 }
 
+function advancePastAlarm(storage: MockStorage) {
+  vi.spyOn(Date, "now").mockReturnValue((storage.alarmTime ?? Date.now()) + 1);
+}
+
 // --- Tests ---
 
 describe("createDOQueue", () => {
-  describe("happy path", () => {
-    it("processes a message and removes it from storage", async () => {
+  describe("batch delivery", () => {
+    it("implicitly acknowledges unsettled messages when queue() succeeds", async () => {
       const processed: string[] = [];
       const DOClass = createDOQueue<string, {}>({
-        async process(message) {
-          processed.push(message.body);
+        async queue(batch) {
+          processed.push(...batch.messages.map((message) => message.body));
         },
       });
 
@@ -111,7 +119,7 @@ describe("createDOQueue", () => {
 
     it("returns a messageId on enqueue", async () => {
       const DOClass = createDOQueue<string, {}>({
-        async process() {},
+        async queue() {},
       });
 
       const mock = createMockDO(DOClass, {});
@@ -120,124 +128,230 @@ describe("createDOQueue", () => {
       expect(result.messageId).toBeDefined();
       expect(typeof result.messageId).toBe("string");
     });
-  });
 
-  describe("FIFO ordering", () => {
-    it("processes messages in enqueue order", async () => {
-      const order: number[] = [];
+    it("delivers queued messages in batches up to maxBatchSize", async () => {
+      const batches: number[][] = [];
+      let release: (() => void) | null = null;
 
       const DOClass = createDOQueue<number, {}>({
-        async process(message) {
-          order.push(message.body);
+        async queue(batch) {
+          batches.push(batch.messages.map((message) => message.body));
+          if (batches.length === 1) {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          }
         },
-      });
+      }, { maxBatchSize: 2 });
 
       const mock = createMockDO(DOClass, {});
+      await mock.enqueueWithoutDrain(1);
+      await mock.enqueueWithoutDrain(2);
+      await mock.enqueueWithoutDrain(3);
 
-      // Enqueue 3 messages sequentially, each fully processes before next
-      await mock.enqueue(1);
-      await mock.enqueue(2);
-      await mock.enqueue(3);
+      release!();
+      await mock.drain();
 
-      expect(order).toEqual([1, 2, 3]);
+      expect(batches).toEqual([[1], [2, 3]]);
+      expect(mock.storage.messageCount).toBe(0);
     });
 
     it("preserves FIFO for same-millisecond enqueues", async () => {
       const order: number[] = [];
-      let block: (() => void) | null = null;
+      let release: (() => void) | null = null;
 
       const DOClass = createDOQueue<number, {}>({
-        async process(message) {
+        async queue(batch) {
           if (order.length === 0) {
-            // Block on first message so others queue up
-            await new Promise<void>((r) => { block = r; });
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
           }
-          order.push(message.body);
+          order.push(...batch.messages.map((message) => message.body));
         },
-      });
+      }, { maxBatchSize: 10 });
 
       const mock = createMockDO(DOClass, {});
-
-      // Fix Date.now() so all enqueues share the same millisecond
       const now = Date.now();
       vi.spyOn(Date, "now").mockReturnValue(now);
 
-      // First enqueue starts processing and blocks
-      await mock.instance.enqueue({ queue: "test", body: 1 });
+      await mock.enqueueWithoutDrain(1);
+      await mock.enqueueWithoutDrain(2);
+      await mock.enqueueWithoutDrain(3);
 
-      // Enqueue 2 and 3 at the same millisecond while first is blocked
-      await mock.instance.enqueue({ queue: "test", body: 2 });
-      await mock.instance.enqueue({ queue: "test", body: 3 });
-
-      // Unblock first message — loop should process 2, 3 in sequence order
-      block!();
-      await Promise.all(mock.waitUntilPromises.splice(0));
+      release!();
+      await mock.drain();
       vi.restoreAllMocks();
 
       expect(order).toEqual([1, 2, 3]);
     });
+
+    it("passes env and waitUntil context to queue()", async () => {
+      let receivedEnv: { secret: string } | null = null;
+      const sideEffects: string[] = [];
+      const DOClass = createDOQueue<string, { secret: string }>({
+        async queue(batch, env, ctx) {
+          receivedEnv = env;
+          ctx.waitUntil(Promise.resolve().then(() => sideEffects.push(batch.queue)));
+        },
+      });
+
+      const mock = createMockDO(DOClass, { secret: "test-key" });
+      await mock.enqueue("test", "jobs");
+
+      expect(receivedEnv).toEqual({ secret: "test-key" });
+      expect(sideEffects).toEqual(["jobs"]);
+      expect(mock.storage.messageCount).toBe(0);
+    });
   });
 
-  describe("retry", () => {
-    it("retries a failed message via alarm", async () => {
-      let attempt = 0;
+  describe("ack and retry settlement", () => {
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("retries unsettled messages when queue() throws", async () => {
+      let calls = 0;
       const DOClass = createDOQueue<string, {}>({
-        async process(message) {
-          attempt++;
-          if (attempt === 1) {
+        async queue() {
+          calls++;
+          if (calls === 1) {
             throw new Error("transient failure");
           }
         },
-      }, { maxRetries: 3, retryBaseDelayMs: 100 });
+      }, { retryBaseDelayMs: 100 });
 
       const mock = createMockDO(DOClass, {});
       await mock.enqueue("retry-me");
 
-      // First attempt failed, message should still be in storage
       expect(mock.storage.messageCount).toBe(1);
       expect(mock.storage.alarmTime).not.toBeNull();
-      expect(attempt).toBe(1);
+      expect(calls).toBe(1);
 
-      // Simulate alarm firing (advance past retryAfter)
-      vi.spyOn(Date, "now").mockReturnValue(mock.storage.alarmTime! + 1);
+      advancePastAlarm(mock.storage);
       await mock.triggerAlarm();
       vi.restoreAllMocks();
 
-      // Second attempt should succeed
-      expect(attempt).toBe(2);
+      expect(calls).toBe(2);
       expect(mock.storage.messageCount).toBe(0);
     });
 
-    it("passes correct attempt count to handler", async () => {
+    it("passes Cloudflare-style attempts starting at 1", async () => {
       const attempts: number[] = [];
       const DOClass = createDOQueue<string, {}>({
-        async process(message) {
-          attempts.push(message.attempts);
-          if (message.attempts < 3) {
-            throw new Error("fail");
+        async queue(batch) {
+          attempts.push(batch.messages[0].attempts);
+          if (batch.messages[0].attempts < 3) {
+            batch.retryAll({ delaySeconds: 0 });
           }
         },
-      }, { maxRetries: 3, retryBaseDelayMs: 10 });
+      }, { maxRetries: 3 });
 
       const mock = createMockDO(DOClass, {});
-      const now = Date.now();
-      vi.spyOn(Date, "now").mockReturnValue(now);
       await mock.enqueue("test");
 
-      // Attempt 1 failed
-      expect(attempts).toEqual([1]);
+      expect(attempts).toEqual([1, 2, 3]);
+      expect(mock.storage.messageCount).toBe(0);
+    });
 
-      // Trigger retry for attempt 2
-      vi.spyOn(Date, "now").mockReturnValue(now + 100000);
-      await mock.triggerAlarm();
-      expect(attempts).toEqual([1, 2]);
+    it("keeps explicit ack when queue() throws later", async () => {
+      let calls = 0;
+      const DOClass = createDOQueue<string, {}>({
+        async queue(batch) {
+          calls++;
+          batch.messages[0].ack();
+          throw new Error("fail after ack");
+        },
+      }, { retryBaseDelayMs: 10 });
 
-      // Trigger retry for attempt 3
-      vi.spyOn(Date, "now").mockReturnValue(now + 200000);
+      const mock = createMockDO(DOClass, {});
+      await mock.enqueue("done");
+
+      expect(calls).toBe(1);
+      expect(mock.storage.messageCount).toBe(0);
+    });
+
+    it("supports explicit retry with delaySeconds", async () => {
+      const now = Date.now();
+      vi.spyOn(Date, "now").mockReturnValue(now);
+      const DOClass = createDOQueue<string, {}>({
+        async queue(batch) {
+          if (batch.messages[0].attempts === 1) {
+            batch.messages[0].retry({ delaySeconds: 30 });
+          }
+        },
+      });
+
+      const mock = createMockDO(DOClass, {});
+      await mock.enqueue("later");
+
+      const [stored] = await mock.storage.messages<string>();
+      expect(stored.retryAfter).toBe(now + 30_000);
+      expect(mock.storage.alarmTime).toBe(now + 30_000);
+      vi.restoreAllMocks();
+    });
+
+    it("uses first settlement wins for message-level ack and retry", async () => {
+      const calls: number[] = [];
+      const DOClass = createDOQueue<number, {}>({
+        async queue(batch) {
+          calls.push(batch.messages[0].attempts);
+          batch.messages[0].retry({ delaySeconds: 0 });
+          batch.messages[0].ack();
+        },
+      }, { maxRetries: 1 });
+
+      const mock = createMockDO(DOClass, {});
+      await mock.enqueue(1);
+
+      expect(calls).toEqual([1, 2]);
+      expect(mock.storage.messageCount).toBe(0);
+    });
+
+    it("does not let ackAll override an explicitly retried message", async () => {
+      const calls: number[] = [];
+      const DOClass = createDOQueue<number, {}>({
+        async queue(batch) {
+          calls.push(batch.messages[0].attempts);
+          batch.messages[0].retry({ delaySeconds: 0 });
+          batch.ackAll();
+        },
+      }, { maxRetries: 1 });
+
+      const mock = createMockDO(DOClass, {});
+      await mock.enqueue(1);
+
+      expect(calls).toEqual([1, 2]);
+      expect(mock.storage.messageCount).toBe(0);
+    });
+
+    it("retries unsettled messages when waitUntil rejects", async () => {
+      let calls = 0;
+      const DOClass = createDOQueue<string, {}>({
+        async queue(_batch, _env, ctx) {
+          calls++;
+          if (calls === 1) {
+            ctx.waitUntil(Promise.reject(new Error("async failure")));
+          }
+        },
+      }, { retryBaseDelayMs: 10 });
+
+      const mock = createMockDO(DOClass, {});
+      await mock.enqueue("retry");
+
+      expect(calls).toBe(1);
+      expect(mock.storage.messageCount).toBe(1);
+
+      advancePastAlarm(mock.storage);
       await mock.triggerAlarm();
       vi.restoreAllMocks();
 
-      expect(attempts).toEqual([1, 2, 3]);
+      expect(calls).toBe(2);
+      expect(mock.storage.messageCount).toBe(0);
     });
   });
 
@@ -250,76 +364,80 @@ describe("createDOQueue", () => {
       vi.restoreAllMocks();
     });
 
-    it("calls deadLetter after maxRetries exhausted and deletes on success", async () => {
-      const deadLettered: Array<{ id: string; error: string }> = [];
+    it("deadLetters after maxRetries retries are exhausted", async () => {
+      const attempts: number[] = [];
+      const deadLettered: Array<{ id: string; attempts: number; error: string }> = [];
       const DOClass = createDOQueue<string, {}>({
-        async process() {
+        async queue(batch) {
+          attempts.push(batch.messages[0].attempts);
           throw new Error("always fails");
         },
         async deadLetter(message, error) {
-          deadLettered.push({ id: message.id, error: error.message });
+          deadLettered.push({
+            id: message.id,
+            attempts: message.attempts,
+            error: error.message,
+          });
         },
       }, { maxRetries: 2, retryBaseDelayMs: 10 });
 
       const mock = createMockDO(DOClass, {});
       await mock.enqueue("doomed");
 
-      // Attempt 1 failed, retry scheduled
-      expect(deadLettered).toHaveLength(0);
-
-      // Trigger alarm for attempt 2 (which is maxRetries)
-      vi.spyOn(Date, "now").mockReturnValue(Date.now() + 100000);
+      advancePastAlarm(mock.storage);
+      await mock.triggerAlarm();
+      advancePastAlarm(mock.storage);
       await mock.triggerAlarm();
       vi.restoreAllMocks();
 
+      expect(attempts).toEqual([1, 2, 3]);
       expect(deadLettered).toHaveLength(1);
+      expect(deadLettered[0].attempts).toBe(3);
       expect(deadLettered[0].error).toBe("always fails");
-      expect(mock.storage.messageCount).toBe(0); // removed after successful DLQ
+      expect(mock.storage.messageCount).toBe(0);
     });
 
-    it("handles missing deadLetter callback gracefully", async () => {
+    it("deletes exhausted messages when no deadLetter callback is configured", async () => {
       const DOClass = createDOQueue<string, {}>({
-        async process() {
-          throw new Error("always fails");
+        async queue(batch) {
+          batch.retryAll({ delaySeconds: 0 });
         },
-        // no deadLetter callback
-      }, { maxRetries: 1, retryBaseDelayMs: 10 });
+      }, { maxRetries: 0 });
 
       const mock = createMockDO(DOClass, {});
       await mock.enqueue("doomed");
 
-      // Should not throw, message should be removed
       expect(mock.storage.messageCount).toBe(0);
     });
 
     it("retains message when deadLetter handler throws", async () => {
+      let processCalls = 0;
       let dlqCalls = 0;
       const DOClass = createDOQueue<string, {}>({
-        async process() {
+        async queue() {
+          processCalls++;
           throw new Error("always fails");
         },
         async deadLetter() {
           dlqCalls++;
           throw new Error("DLQ handler also fails");
         },
-      }, { maxRetries: 1, retryBaseDelayMs: 10 });
+      }, { maxRetries: 0, retryBaseDelayMs: 10 });
 
       const mock = createMockDO(DOClass, {});
       await mock.enqueue("doomed");
 
-      // process failed (attempt 1 = maxRetries), deadLetter was called and threw
+      expect(processCalls).toBe(1);
       expect(dlqCalls).toBe(1);
-      // Message should be retained in storage for DLQ retry
       expect(mock.storage.messageCount).toBe(1);
-      // An alarm should be scheduled for retry
       expect(mock.storage.alarmTime).not.toBeNull();
     });
 
-    it("retries deadLetter handler on alarm and deletes on success", async () => {
+    it("retries deadLetter handler without rerunning queue()", async () => {
       let processCalls = 0;
       let dlqCalls = 0;
       const DOClass = createDOQueue<string, {}>({
-        async process() {
+        async queue() {
           processCalls++;
           throw new Error("always fails");
         },
@@ -328,128 +446,47 @@ describe("createDOQueue", () => {
           if (dlqCalls === 1) {
             throw new Error("DLQ transient failure");
           }
-          // Second DLQ call succeeds
         },
-      }, { maxRetries: 1, retryBaseDelayMs: 10 });
+      }, { maxRetries: 0, retryBaseDelayMs: 10 });
 
       const mock = createMockDO(DOClass, {});
       const now = Date.now();
       vi.spyOn(Date, "now").mockReturnValue(now);
       await mock.enqueue("doomed");
 
-      // First DLQ attempt failed, message retained
-      expect(processCalls).toBe(1);
-      expect(dlqCalls).toBe(1);
-      expect(mock.storage.messageCount).toBe(1);
-
-      // Trigger alarm — DLQ retry should succeed
       vi.spyOn(Date, "now").mockReturnValue(now + 100000);
       await mock.triggerAlarm();
       vi.restoreAllMocks();
 
       expect(processCalls).toBe(1);
       expect(dlqCalls).toBe(2);
-      expect(mock.storage.messageCount).toBe(0); // now deleted
-    });
-
-    it("keeps retrying deadLetter without rerunning process or discarding", async () => {
-      let processCalls = 0;
-      let dlqCalls = 0;
-      const DOClass = createDOQueue<string, {}>({
-        async process() {
-          processCalls++;
-          throw new Error("always fails");
-        },
-        async deadLetter() {
-          dlqCalls++;
-          throw new Error("DLQ always fails");
-        },
-      }, { maxRetries: 1, retryBaseDelayMs: 10 });
-
-      const mock = createMockDO(DOClass, {});
-      const now = Date.now();
-      vi.spyOn(Date, "now").mockReturnValue(now);
-      await mock.enqueue("doomed");
-
-      // DLQ attempt 1 failed
-      expect(processCalls).toBe(1);
-      expect(dlqCalls).toBe(1);
-      expect(mock.storage.messageCount).toBe(1);
-
-      // DLQ attempt 2
-      vi.spyOn(Date, "now").mockReturnValue(now + 100000);
-      await mock.triggerAlarm();
-      expect(processCalls).toBe(1);
-      expect(dlqCalls).toBe(2);
-      expect(mock.storage.messageCount).toBe(1);
-
-      // DLQ attempt 3 — still retained, matching a configured Cloudflare DLQ handoff
-      vi.spyOn(Date, "now").mockReturnValue(now + 200000);
-      await mock.triggerAlarm();
-      vi.restoreAllMocks();
-
-      expect(processCalls).toBe(1);
-      expect(dlqCalls).toBe(3);
-      expect(mock.storage.messageCount).toBe(1);
-    });
-  });
-
-  describe("env passthrough", () => {
-    it("passes env to process handler", async () => {
-      let receivedEnv: { secret: string } | null = null;
-      const DOClass = createDOQueue<string, { secret: string }>({
-        async process(_message, env) {
-          receivedEnv = env;
-        },
-      });
-
-      const mock = createMockDO(DOClass, { secret: "test-key" });
-      await mock.enqueue("test");
-
-      expect(receivedEnv).toEqual({ secret: "test-key" });
-    });
-
-    it("passes env to deadLetter handler", async () => {
-      let receivedEnv: { secret: string } | null = null;
-      const DOClass = createDOQueue<string, { secret: string }>({
-        async process() {
-          throw new Error("fail");
-        },
-        async deadLetter(_message, _error, env) {
-          receivedEnv = env;
-        },
-      }, { maxRetries: 1 });
-
-      const mock = createMockDO(DOClass, { secret: "dlq-key" });
-      await mock.enqueue("test");
-
-      expect(receivedEnv).toEqual({ secret: "dlq-key" });
+      expect(mock.storage.messageCount).toBe(0);
     });
   });
 
   describe("stats RPC", () => {
     it("returns pending message count", async () => {
-      let block: (() => void) | null = null;
+      let release: (() => void) | null = null;
       const DOClass = createDOQueue<string, {}>({
-        async process() {
-          await new Promise<void>((r) => { block = r; });
+        async queue() {
+          await new Promise<void>((resolve) => {
+            release = resolve;
+          });
         },
       });
 
       const mock = createMockDO(DOClass, {});
 
-      // Check empty queue
       const emptyStats = await mock.instance.stats();
       expect(emptyStats.pendingMessages).toBe(0);
 
-      // Enqueue without awaiting (so it blocks in process)
-      await mock.instance.enqueue({ queue: "test", body: "msg" });
+      await mock.enqueueWithoutDrain("msg");
 
       const stats = await mock.instance.stats();
       expect(stats.pendingMessages).toBe(1);
 
-      block!();
-      await Promise.all(mock.waitUntilPromises.splice(0));
+      release!();
+      await mock.drain();
     });
   });
 });
@@ -479,12 +516,10 @@ describe("computeBackoff", () => {
     for (let i = 0; i < 20; i++) {
       results.add(computeBackoff(1, 1000, 30000, 0.5));
     }
-    // With jitter, we should get varying results
     expect(results.size).toBeGreaterThan(1);
-    // All should be >= base (jitter only adds, never subtracts)
     for (const r of results) {
       expect(r).toBeGreaterThanOrEqual(1000);
-      expect(r).toBeLessThanOrEqual(1500); // base + base * 0.5
+      expect(r).toBeLessThanOrEqual(1500);
     }
   });
 });
