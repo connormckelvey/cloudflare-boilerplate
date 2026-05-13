@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare-boilerplate/do-queue",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Durable Object-based queue for Cloudflare Workers with near-zero dispatch latency",
   "type": "module",
   "main": "./dist/index.js",
