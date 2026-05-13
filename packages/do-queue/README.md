@@ -2,6 +2,8 @@
 
 A FIFO message queue built on Cloudflare Durable Objects. Processes messages immediately on receipt (~10-50ms) instead of going through Cloudflare Queues (~3-5s dispatch latency per hop).
 
+`do-queue` uses Durable Object RPC methods, so your Worker compatibility date must be `2024-04-03` or newer.
+
 ## Usage
 
 ### Producer
@@ -19,7 +21,11 @@ await producer.send({ foo: "bar" }, { key: userId });
 ### Consumer
 
 ```ts
-import { createDOQueue } from "@cloudflare-boilerplate/do-queue";
+import { createDOQueue, type DOQueueNamespace } from "@cloudflare-boilerplate/do-queue";
+
+interface Env {
+  MY_QUEUE_DO: DOQueueNamespace<MyMessage, Env>;
+}
 
 export const MyQueueDO = createDOQueue<MyMessage, Env>({
   async process(message, env) {
@@ -40,6 +46,7 @@ Bind in `wrangler.jsonc`:
 
 ```jsonc
 {
+  "compatibility_date": "2024-04-03",
   "durable_objects": {
     "bindings": [
       { "name": "MY_QUEUE_DO", "class_name": "MyQueueDO" }

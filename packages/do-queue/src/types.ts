@@ -22,6 +22,19 @@ export interface ConsumerHandler<T = unknown, Env = unknown> {
   deadLetter?(message: QueueMessage<T>, lastError: Error, env: Env): Promise<void>;
 }
 
+export interface EnqueueRequest<T = unknown> {
+  queue: string;
+  body: T;
+}
+
+export interface EnqueueResult {
+  messageId: string;
+}
+
+export interface QueueStats {
+  pendingMessages: number;
+}
+
 export interface StoredMessage<T = unknown> {
   id: string;
   queue: string;

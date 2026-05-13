@@ -78,15 +78,10 @@ function createMockDO<T, Env>(
     storage,
     waitUntilPromises,
     async enqueue(body: T, queue = "test-queue") {
-      const request = new Request("https://do-queue.internal/enqueue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queue, body }),
-      });
-      const response = await instance.fetch(request);
+      const result = await instance.enqueue({ queue, body });
       // Wait for processing triggered by waitUntil
       await Promise.all(waitUntilPromises.splice(0));
-      return response.json() as Promise<{ messageId: string }>;
+      return result;
     },
     async triggerAlarm() {
       storage.alarmTime = null;
@@ -168,26 +163,11 @@ describe("createDOQueue", () => {
       vi.spyOn(Date, "now").mockReturnValue(now);
 
       // First enqueue starts processing and blocks
-      const req1 = new Request("https://do-queue.internal/enqueue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queue: "test", body: 1 }),
-      });
-      await mock.instance.fetch(req1);
+      await mock.instance.enqueue({ queue: "test", body: 1 });
 
       // Enqueue 2 and 3 at the same millisecond while first is blocked
-      const req2 = new Request("https://do-queue.internal/enqueue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queue: "test", body: 2 }),
-      });
-      const req3 = new Request("https://do-queue.internal/enqueue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queue: "test", body: 3 }),
-      });
-      await mock.instance.fetch(req2);
-      await mock.instance.fetch(req3);
+      await mock.instance.enqueue({ queue: "test", body: 2 });
+      await mock.instance.enqueue({ queue: "test", body: 3 });
 
       // Unblock first message — loop should process 2, 3 in sequence order
       block!();
@@ -447,7 +427,7 @@ describe("createDOQueue", () => {
     });
   });
 
-  describe("stats endpoint", () => {
+  describe("stats RPC", () => {
     it("returns pending message count", async () => {
       let block: (() => void) | null = null;
       const DOClass = createDOQueue<string, {}>({
@@ -459,22 +439,13 @@ describe("createDOQueue", () => {
       const mock = createMockDO(DOClass, {});
 
       // Check empty queue
-      const emptyReq = new Request("https://do-queue.internal/stats");
-      const emptyRes = await mock.instance.fetch(emptyReq);
-      const emptyStats = await emptyRes.json() as { pendingMessages: number };
+      const emptyStats = await mock.instance.stats();
       expect(emptyStats.pendingMessages).toBe(0);
 
       // Enqueue without awaiting (so it blocks in process)
-      const req = new Request("https://do-queue.internal/enqueue", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ queue: "test", body: "msg" }),
-      });
-      await mock.instance.fetch(req);
+      await mock.instance.enqueue({ queue: "test", body: "msg" });
 
-      const statsReq = new Request("https://do-queue.internal/stats");
-      const statsRes = await mock.instance.fetch(statsReq);
-      const stats = await statsRes.json() as { pendingMessages: number };
+      const stats = await mock.instance.stats();
       expect(stats.pendingMessages).toBe(1);
 
       block!();

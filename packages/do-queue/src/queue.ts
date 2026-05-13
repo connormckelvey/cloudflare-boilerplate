@@ -1,46 +1,49 @@
-import type { QueueMessage, QueueOptions, ConsumerHandler, StoredMessage } from "./types.js";
+import { DurableObject } from "cloudflare:workers";
+import type {
+  QueueMessage,
+  QueueOptions,
+  ConsumerHandler,
+  EnqueueRequest,
+  EnqueueResult,
+  QueueStats,
+  StoredMessage,
+} from "./types.js";
 import { computeBackoff } from "./retry.js";
 
 const FALLBACK_ALARM_MS = 10_000;
 const SEQ_KEY = "meta:seq";
 
+export type DOQueueInstance<T = unknown, Env = unknown> = DurableObject<Env> & {
+  enqueue(input: EnqueueRequest<T>): Promise<EnqueueResult>;
+  stats(): Promise<QueueStats>;
+  alarm(): Promise<void>;
+};
+
+export type DOQueueClass<T = unknown, Env = unknown> = new (
+  ctx: DurableObjectState,
+  env: Env
+) => DOQueueInstance<T, Env>;
+
+export type DOQueueNamespace<T = unknown, Env = unknown> =
+  DurableObjectNamespace<DOQueueInstance<T, Env>>;
+
 export function createDOQueue<T = unknown, Env = unknown>(
   handler: ConsumerHandler<T, Env>,
   options?: QueueOptions
-) {
+): DOQueueClass<T, Env> {
   const maxRetries = options?.maxRetries ?? 3;
   const retryBaseDelayMs = options?.retryBaseDelayMs ?? 1000;
   const retryMaxDelayMs = options?.retryMaxDelayMs ?? 30000;
   const retryJitter = options?.retryJitter ?? 0.1;
 
-  return class DOQueueImpl {
-    ctx: DurableObjectState;
-    env: Env;
+  return class DOQueueImpl extends DurableObject<Env> {
     #processing = false;
 
     constructor(ctx: DurableObjectState, env: Env) {
-      this.ctx = ctx;
-      this.env = env;
+      super(ctx, env);
     }
 
-    async fetch(request: Request): Promise<Response> {
-      const url = new URL(request.url);
-
-      if (url.pathname === "/enqueue" && request.method === "POST") {
-        return this.#handleEnqueue(request);
-      }
-      if (url.pathname === "/stats" && request.method === "GET") {
-        return this.#handleStats();
-      }
-
-      return new Response("Not found", { status: 404 });
-    }
-
-    async #handleEnqueue(request: Request): Promise<Response> {
-      const { queue, body } = (await request.json()) as {
-        queue: string;
-        body: T;
-      };
+    async enqueue({ queue, body }: EnqueueRequest<T>): Promise<EnqueueResult> {
       const id = crypto.randomUUID();
       const enqueuedAt = Date.now();
 
@@ -69,7 +72,7 @@ export function createDOQueue<T = unknown, Env = unknown>(
         this.ctx.waitUntil(this.#processNext());
       }
 
-      return Response.json({ messageId: id });
+      return { messageId: id };
     }
 
     async #processNext(): Promise<void> {
@@ -214,9 +217,9 @@ export function createDOQueue<T = unknown, Env = unknown>(
       await this.#processNext();
     }
 
-    async #handleStats(): Promise<Response> {
+    async stats(): Promise<QueueStats> {
       const entries = await this.ctx.storage.list({ prefix: "msg:" });
-      return Response.json({ pendingMessages: entries.size });
+      return { pendingMessages: entries.size };
     }
   };
 }
