@@ -9,17 +9,23 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const rootDir = join(__dirname, '..');
 
-// Get package name and version type from command line args
+// Get package name and version type from command line args. The release:* npm
+// scripts infer their bump type so `npm run release:patch -- do-queue` works.
 const packageName = process.argv[2];
-const versionType = process.argv[3];
+let versionType = process.argv[3];
+const lifecycleEvent = process.env.npm_lifecycle_event;
+
+if (!versionType && lifecycleEvent?.startsWith('release:')) {
+  versionType = lifecycleEvent.split(':')[1];
+}
 
 if (!packageName || !versionType || !['patch', 'minor', 'major'].includes(versionType)) {
-  console.error('Usage: npm run release <package-name> [patch|minor|major]');
-  console.error('   or: npm run release:patch <package-name>');
-  console.error('   or: npm run release:minor <package-name>');
-  console.error('   or: npm run release:major <package-name>');
+  console.error('Usage: npm run release -- <package-name> [patch|minor|major]');
+  console.error('   or: npm run release:patch -- <package-name>');
+  console.error('   or: npm run release:minor -- <package-name>');
+  console.error('   or: npm run release:major -- <package-name>');
   console.error('');
-  console.error('Example: npm run release prisma patch');
+  console.error('Example: npm run release -- prisma patch');
   process.exit(1);
 }
 
@@ -91,4 +97,3 @@ try {
   console.error('Error:', error.message);
   process.exit(1);
 }
-

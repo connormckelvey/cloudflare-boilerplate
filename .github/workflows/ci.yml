@@ -31,15 +31,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
       
-      - name: Build library
-        run: cd packages/prisma && npm run build
-      
-      - name: Type check library
-        run: cd packages/prisma && npx tsc --noEmit
-      
+      - name: Build packages
+        run: npm run build
+
       - name: Type check example
         run: cd examples/prisma-worker && npx tsc --noEmit
       
       - name: Test
         run: npm run test
-
